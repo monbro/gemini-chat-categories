@@ -247,7 +247,6 @@
 .gcf-add-root .gcf-icon svg { width: 16px; height: 16px; }
 
 /* ── Drive Sync Button ────────────────────────────────────────────────────── */
-.gcf-refresh-btn,
 .gcf-sync-btn {
   display: flex;
   align-items: center;
@@ -260,13 +259,8 @@
   cursor: pointer;
   transition: background 0.15s, border-color 0.15s, color 0.15s;
 }
-.gcf-refresh-btn .gcf-icon,
 .gcf-sync-btn .gcf-sync-icon { display: flex; width: 16px; height: 16px; }
-.gcf-refresh-btn .gcf-icon svg,
 .gcf-sync-btn .gcf-sync-icon svg { width: 16px; height: 16px; }
-
-.gcf-refresh-btn { color: var(--gcf-text-muted); }
-.gcf-refresh-btn:hover { background: var(--gcf-bg-hover); border-color: var(--gcf-accent); color: var(--gcf-accent); }
 
 .gcf-sync-idle  { color: var(--gcf-text-muted); }
 .gcf-sync-syncing { color: var(--gcf-accent); border-color: var(--gcf-accent); }

@@ -333,9 +333,6 @@
                  value="${esc(state.searchQuery)}" autocomplete="off" />
         </div>
         <button class="gcf-add-root" title="New folder">${icon('plus')}</button>
-        <button id="gcf-refresh-btn" class="gcf-refresh-btn" title="Refresh chat list">
-          <span class="gcf-icon">${icon('refresh')}</span>
-        </button>
         <button id="gcf-sync-btn" class="gcf-sync-btn gcf-sync-${syncStatus}" title="${syncStatus === 'idle' ? 'Connect Google Drive' : 'Google Drive Sync'}">
           <span class="gcf-icon gcf-sync-icon">${syncIconSVG(syncStatus)}</span>
         </button>
@@ -354,9 +351,6 @@
       updateTree();
     });
     foldersPanel.querySelector('.gcf-add-root')?.addEventListener('click', () => promptFolder(null));
-    foldersPanel.querySelector('#gcf-refresh-btn')?.addEventListener('click', () => {
-      updateTree();
-    });
     foldersPanel.querySelector('#gcf-sync-btn')?.addEventListener('click', async () => {
       if (syncStatus === 'idle' || syncStatus === 'error') {
         // Need interactive auth

@@ -1,8 +1,11 @@
 // Gemini Chat Folders - background service worker
-// Uses launchWebAuthFlow (works in Brave, Edge, and any Chromium browser)
+// Uses implicit flow with silent refresh so the user rarely needs to interact.
+// A popup is only shown on first connect or if fully logged out of Google.
 
 const CLIENT_ID = '1053097274875-sm6vkuiemk98nq3akuhqleiioi0imm6o.apps.googleusercontent.com';
 const SCOPES    = 'https://www.googleapis.com/auth/drive.appdata';
+
+// ─── TOKEN STORAGE ────────────────────────────────────────────────────────────
 
 function getStoredToken() {
   return new Promise(resolve => {
@@ -14,7 +17,16 @@ function getStoredToken() {
   });
 }
 
-function launchAuthFlow() {
+function saveToken(token, expiresIn) {
+  return chrome.storage.local.set({
+    gcf_drive_token:        token,
+    gcf_drive_token_expiry: Date.now() + (expiresIn || 3600) * 1000,
+  });
+}
+
+// ─── AUTH FLOW ────────────────────────────────────────────────────────────────
+
+function runAuthFlow(interactive) {
   const redirectUri = chrome.identity.getRedirectURL();
   const authUrl = 'https://accounts.google.com/o/oauth2/auth?' + new URLSearchParams({
     client_id:     CLIENT_ID,
@@ -24,23 +36,16 @@ function launchAuthFlow() {
   });
 
   return new Promise((resolve, reject) => {
-    chrome.identity.launchWebAuthFlow({ url: authUrl, interactive: true }, responseUrl => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-        return;
-      }
-      if (!responseUrl) {
-        reject(new Error('No token'));
+    chrome.identity.launchWebAuthFlow({ url: authUrl, interactive }, responseUrl => {
+      if (chrome.runtime.lastError || !responseUrl) {
+        reject(new Error(chrome.runtime.lastError?.message || 'No response URL'));
         return;
       }
       const params    = new URLSearchParams(new URL(responseUrl).hash.slice(1));
       const token     = params.get('access_token');
       const expiresIn = parseInt(params.get('expires_in') || '3600');
       if (token) {
-        chrome.storage.local.set({
-          gcf_drive_token:        token,
-          gcf_drive_token_expiry: Date.now() + expiresIn * 1000,
-        });
+        saveToken(token, expiresIn);
         resolve(token);
       } else {
         reject(new Error('No access_token in response'));
@@ -49,20 +54,35 @@ function launchAuthFlow() {
   });
 }
 
+// ─── MESSAGE HANDLER ──────────────────────────────────────────────────────────
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.action === 'getAuthToken') {
     (async () => {
       try {
+        // 1. Stored token still valid
         const stored = await getStoredToken();
         if (stored) {
           sendResponse({ token: stored });
           return;
         }
+
+        // 2. Silent refresh — works as long as the browser has an active Google session
+        try {
+          const token = await runAuthFlow(false);
+          sendResponse({ token });
+          return;
+        } catch (_) {
+          // Silent attempt failed (e.g. fully logged out) — fall through
+        }
+
+        // 3. Interactive login required
         if (!msg.interactive) {
           sendResponse({ error: 'No token' });
           return;
         }
-        const token = await launchAuthFlow();
+
+        const token = await runAuthFlow(true);
         sendResponse({ token });
       } catch (e) {
         sendResponse({ error: e.message });
