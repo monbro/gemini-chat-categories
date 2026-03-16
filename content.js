@@ -5,24 +5,39 @@
   // ─── STATE ──────────────────────────────────────────────────────────────────
 
   let state = {
-    folders: [],      // [{ id, name, color, parentId, expanded, chatIds, createdAt }]
-    chats: {},        // { chatId: { title, url } }
+    folders: [],         // [{ id, name, color, parentId, expanded, chatIds, createdAt, updatedAt }]
+    chats: {},           // { chatId: { title, url } }
+    deletedFolders: [],  // [{ id, deletedAt }] – tombstones for merge
     foldersVisible: false,
     searchQuery: '',
     unassignedQuery: '',
     unassignedSearchOpen: false,
+    lastModified: 0,
   };
 
   // ─── STORAGE ─────────────────────────────────────────────────────────────────
 
+  function persistLocal() {
+    chrome.storage.local.set({
+      gcf_folders:         state.folders,
+      gcf_chats:           state.chats,
+      gcf_deleted_folders: state.deletedFolders,
+      gcf_lastModified:    state.lastModified,
+    });
+  }
+
   function saveState() {
-    chrome.storage.local.set({ gcf_folders: state.folders, gcf_chats: state.chats });
+    state.lastModified = Date.now();
+    persistLocal();
+    schedulePush();
   }
 
   function loadState(callback) {
-    chrome.storage.local.get(['gcf_folders', 'gcf_chats'], (result) => {
-      if (result.gcf_folders) state.folders = result.gcf_folders;
-      if (result.gcf_chats) state.chats = result.gcf_chats;
+    chrome.storage.local.get(['gcf_folders', 'gcf_chats', 'gcf_deleted_folders', 'gcf_lastModified'], (result) => {
+      if (result.gcf_folders)         state.folders        = result.gcf_folders;
+      if (result.gcf_chats)           state.chats          = result.gcf_chats;
+      if (result.gcf_deleted_folders) state.deletedFolders = result.gcf_deleted_folders;
+      state.lastModified = result.gcf_lastModified || 0;
       callback && callback();
     });
   }
@@ -34,26 +49,29 @@
   }
 
   function createFolder(name, parentId = null, color = '#4285f4') {
-    const folder = { id: uid(), name, parentId, color, expanded: true, chatIds: [], createdAt: Date.now() };
+    const now = Date.now();
+    const folder = { id: uid(), name, parentId, color, expanded: true, chatIds: [], createdAt: now, updatedAt: now };
     state.folders.push(folder);
     saveState();
     return folder;
   }
 
   function deleteFolder(folderId) {
+    const now = Date.now();
     state.folders.filter(f => f.parentId === folderId).forEach(f => deleteFolder(f.id));
     state.folders = state.folders.filter(f => f.id !== folderId);
+    state.deletedFolders.push({ id: folderId, deletedAt: now });
     saveState();
   }
 
   function renameFolder(folderId, name) {
     const f = state.folders.find(f => f.id === folderId);
-    if (f) { f.name = name; saveState(); }
+    if (f) { f.name = name; f.updatedAt = Date.now(); saveState(); }
   }
 
   function setFolderColor(folderId, color) {
     const f = state.folders.find(f => f.id === folderId);
-    if (f) { f.color = color; saveState(); }
+    if (f) { f.color = color; f.updatedAt = Date.now(); saveState(); }
   }
 
   function toggleFolderExpanded(folderId) {
@@ -65,13 +83,14 @@
     const f = state.folders.find(f => f.id === folderId);
     if (!f) return;
     if (!f.chatIds.includes(chatId)) f.chatIds.push(chatId);
+    f.updatedAt = Date.now();
     state.chats[chatId] = { title, url };
     saveState();
   }
 
   function removeChatFromFolder(folderId, chatId) {
     const f = state.folders.find(f => f.id === folderId);
-    if (f) { f.chatIds = f.chatIds.filter(id => id !== chatId); saveState(); }
+    if (f) { f.chatIds = f.chatIds.filter(id => id !== chatId); f.updatedAt = Date.now(); saveState(); }
   }
 
   function moveChatBetweenFolders(fromId, toId, chatId) {
@@ -132,35 +151,61 @@
     return `<span class="gcf-icon">${icons[name] || ''}</span>`;
   }
 
+  // Build a chat URL that preserves the /u/N/ user prefix from the current page,
+  // so navigation works correctly for both gemini.google.com/app/… and /u/1/app/…
+  function chatUrl(chatId) {
+    const m = window.location.pathname.match(/^(\/u\/\d+)\//);
+    const prefix = m ? m[1] : '';
+    return `https://gemini.google.com${prefix}/app/${chatId}`;
+  }
+
   // ─── DOM REFS ─────────────────────────────────────────────────────────────────
 
   let foldersBtn = null;
   let foldersPanel = null;
-  let nativeChatHistory = null;
+  let overlayContainer = null;
+  let lastPullTime = 0;
+
+  // ─── DRIVE SYNC STATE ────────────────────────────────────────────────────────
+
+  const DRIVE_FILE_NAME = 'gemini-chat-folders.json';
+  const DRIVE_API       = 'https://www.googleapis.com/drive/v3';
+  const DRIVE_UPLOAD    = 'https://www.googleapis.com/upload/drive/v3';
+
+  let driveFileId = null;   // cached Drive file ID once found/created
+  let syncTimeout = null;   // debounce handle for pushToDrive
+  let syncStatus  = 'idle'; // 'idle' | 'syncing' | 'synced' | 'error'
 
   // ─── INJECTION ────────────────────────────────────────────────────────────────
 
   function injectFoldersButton() {
     if (document.getElementById('gcf-btn')) return;
 
-    const actionList = document.querySelector('mat-action-list.top-action-list');
-    if (!actionList) return;
+    const newChatButton = document.querySelector('side-nav-action-button[data-test-id="new-chat-button"]');
+    if (!newChatButton) return;
 
-    foldersBtn = document.createElement('div');
+    const tempChatButton = newChatButton.querySelector('temp-chat-button');
+    if (!tempChatButton) return;
+
+    foldersBtn = document.createElement('button');
     foldersBtn.id = 'gcf-btn';
+    foldersBtn.className = 'mdc-icon-button mat-mdc-icon-button mat-mdc-button-base gcf-folders-button mat-unthemed';
+    foldersBtn.setAttribute('aria-label', 'Chat Folders');
+    foldersBtn.setAttribute('title', 'Chat Folders');
     foldersBtn.innerHTML = `
-      <button class="gcf-toggle" title="Chat Folders">
-        <span class="gcf-toggle-icon">${icon('folders')}</span>
-        <span class="gcf-toggle-label">Folders</span>
-      </button>`;
+      <span class="mat-mdc-button-persistent-ripple mdc-icon-button__ripple"></span>
+      ${icon('folders')}
+      <span class="mat-focus-indicator"></span>
+      <span class="mat-mdc-button-touch-target"></span>
+      <span class="mat-ripple mat-mdc-button-ripple"></span>`;
 
-    actionList.parentNode.insertBefore(foldersBtn, actionList.nextSibling);
-    foldersBtn.querySelector('button').addEventListener('click', togglePanel);
+    newChatButton.insertBefore(foldersBtn, tempChatButton);
+    foldersBtn.addEventListener('click', togglePanel);
   }
 
   function togglePanel() {
     state.foldersVisible = !state.foldersVisible;
-    document.querySelector('.gcf-toggle')?.classList.toggle('active', state.foldersVisible);
+    document.getElementById('gcf-btn')?.classList.toggle('active', state.foldersVisible);
 
     if (state.foldersVisible) {
       showPanel();
@@ -170,30 +215,29 @@
   }
 
   function showPanel() {
-    nativeChatHistory = document.querySelector('.chat-history');
-    if (nativeChatHistory) nativeChatHistory.style.display = 'none';
+    // Create overlay container if it doesn't exist
+    if (!overlayContainer) {
+      overlayContainer = document.createElement('div');
+      overlayContainer.id = 'gcf-overlay';
+      overlayContainer.innerHTML = '<div id="gcf-backdrop"></div>';
+      document.body.appendChild(overlayContainer);
 
+      // Close on backdrop click
+      overlayContainer.querySelector('#gcf-backdrop').addEventListener('click', togglePanel);
+    }
+
+    // Create panel if it doesn't exist
     if (!foldersPanel) {
       foldersPanel = document.createElement('div');
       foldersPanel.id = 'gcf-panel';
-      // Insert right before the native chat history. Its parent is always available
-      // because we already found it above.
-      if (nativeChatHistory) {
-        nativeChatHistory.parentNode.insertBefore(foldersPanel, nativeChatHistory);
-      } else {
-        // Fallback: append to the first candidate sidebar container we find
-        const fallback = document.querySelector('side-navigation-content') ||
-                         document.querySelector('bard-sidenav') ||
-                         document.body;
-        fallback.appendChild(foldersPanel);
-      }
+      overlayContainer.appendChild(foldersPanel);
     }
 
     applyTheme();
-    foldersPanel.style.display = 'flex';
+    overlayContainer.style.display = 'flex';
     render();
-    fitPanelHeight();
     enableNativeDrag();
+    if (Date.now() - lastPullTime > 60_000) pullFromDrive();
   }
 
   // ─── THEME DETECTION ─────────────────────────────────────────────────────────
@@ -230,24 +274,11 @@
     document.getElementById('gcf-btn')?.classList.toggle('gcf-light', !isDark);
   }
 
-  // Constrain the panel height so the inner tree can scroll independently.
-  // We measure from the panel's top edge to the bottom of the sidebar viewport.
-  function fitPanelHeight() {
-    if (!foldersPanel) return;
-    const sidebar = document.querySelector('bard-sidenav') ||
-                    document.querySelector('side-navigation-content');
-    if (!sidebar) return;
-    const sidebarBottom = sidebar.getBoundingClientRect().bottom;
-    const panelTop = foldersPanel.getBoundingClientRect().top;
-    const available = sidebarBottom - panelTop - 8;
-    if (available > 80) {
-      foldersPanel.style.height = `${available}px`;
-    }
-  }
+  // Theme detection moved below
+
 
   function hidePanel() {
-    if (foldersPanel) foldersPanel.style.display = 'none';
-    if (nativeChatHistory) nativeChatHistory.style.display = '';
+    if (overlayContainer) overlayContainer.style.display = 'none';
     removeNativeDrag();
   }
 
@@ -280,12 +311,14 @@
                  value="${esc(state.searchQuery)}" autocomplete="off" />
         </div>
         <button class="gcf-add-root" title="New folder">${icon('plus')}</button>
+        <button id="gcf-sync-btn" class="gcf-sync-btn gcf-sync-${syncStatus}" title="${syncStatus === 'idle' ? 'Connect Google Drive' : 'Google Drive Sync'}">
+          <span class="gcf-icon gcf-sync-icon">${syncIconSVG(syncStatus)}</span>
+        </button>
       </div>
       <div id="gcf-tree" class="gcf-tree"></div>`;
 
     bindHeaderEvents();
     updateTree();
-    fitPanelHeight();
   }
 
   function bindHeaderEvents() {
@@ -296,6 +329,22 @@
       updateTree();
     });
     foldersPanel.querySelector('.gcf-add-root')?.addEventListener('click', () => promptFolder(null));
+    foldersPanel.querySelector('#gcf-sync-btn')?.addEventListener('click', async () => {
+      if (syncStatus === 'idle' || syncStatus === 'error') {
+        // Need interactive auth
+        updateSyncStatus('syncing');
+        try {
+          await getDriveToken(true);
+          driveFileId = null;
+          await pullFromDrive();
+        } catch (e) {
+          updateSyncStatus('error');
+        }
+      } else {
+        // Already connected – pull (which merges then pushes merged result)
+        await pullFromDrive();
+      }
+    });
   }
 
   // Add/remove the × clear button without touching the input element
@@ -354,8 +403,7 @@
     listEl.querySelectorAll('.gcf-chat').forEach(item => {
       item.addEventListener('click', e => {
         if (e.target.closest('.gcf-remove-chat')) return;
-        const chat = available.find(c => c.id === item.dataset.chatId);
-        if (chat?.url) window.location.href = chat.url;
+        window.location.href = chatUrl(item.dataset.chatId);
       });
     });
     // Re-bind drag on new items
@@ -508,9 +556,7 @@
     tree.querySelectorAll('.gcf-chat').forEach(item => {
       item.addEventListener('click', e => {
         if (e.target.closest('.gcf-remove-chat')) return;
-        const chatId = item.dataset.chatId;
-        const chat = state.chats[chatId] || available.find(c => c.id === chatId);
-        if (chat?.url) window.location.href = chat.url;
+        window.location.href = chatUrl(item.dataset.chatId);
       });
     });
 
@@ -628,14 +674,14 @@
 
         const chatId = e.dataTransfer.getData('gcf/chat-id');
         const chatTitle = e.dataTransfer.getData('gcf/chat-title');
-        const chatUrl = e.dataTransfer.getData('gcf/chat-url');
+        const chatHref = e.dataTransfer.getData('gcf/chat-url');
         const srcFolder = e.dataTransfer.getData('gcf/src-folder') || null;
         const targetFolder = zone.dataset.folderId || null;
 
         if (chatId && targetFolder) {
           if (srcFolder !== targetFolder) moveChatBetweenFolders(srcFolder, targetFolder, chatId);
-          if (!state.chats[chatId]) state.chats[chatId] = { title: chatTitle, url: chatUrl };
-          if (srcFolder === null) addChatToFolder(targetFolder, chatId, chatTitle, chatUrl);
+          if (!state.chats[chatId]) state.chats[chatId] = { title: chatTitle, url: chatHref };
+          if (srcFolder === null) addChatToFolder(targetFolder, chatId, chatTitle, chatHref);
           render();
         }
       });
@@ -767,6 +813,194 @@
     document.getElementById('gcf-modal')?.remove();
   }
 
+  // ─── DRIVE SYNC ───────────────────────────────────────────────────────────────
+
+  function getDriveToken(interactive) {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ action: 'getAuthToken', interactive }, response => {
+        if (chrome.runtime.lastError || response?.error) {
+          reject(new Error(response?.error || chrome.runtime.lastError?.message || 'No token'));
+        } else if (response?.token) {
+          resolve(response.token);
+        } else {
+          reject(new Error('No token'));
+        }
+      });
+    });
+  }
+
+  async function findOrCreateDriveFile(token) {
+    if (driveFileId) return driveFileId;
+
+    const searchRes = await fetch(
+      `${DRIVE_API}/files?spaces=appDataFolder&q=name%3D%22${DRIVE_FILE_NAME}%22&fields=files(id)`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    const searchData = await searchRes.json();
+
+    if (searchData.files && searchData.files.length > 0) {
+      driveFileId = searchData.files[0].id;
+      return driveFileId;
+    }
+
+    // Create new empty file in appDataFolder
+    const metadata = { name: DRIVE_FILE_NAME, parents: ['appDataFolder'] };
+    const emptyPayload = JSON.stringify({ version: 1, lastModified: 0, folders: [], chats: {} });
+    const form = new FormData();
+    form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
+    form.append('media', new Blob([emptyPayload], { type: 'application/json' }));
+
+    const createRes = await fetch(
+      `${DRIVE_UPLOAD}/files?uploadType=multipart&fields=id`,
+      { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: form }
+    );
+    const created = await createRes.json();
+    driveFileId = created.id;
+    return driveFileId;
+  }
+
+  // Merges two states (local + drive) into one without data loss.
+  // Rules:
+  //   Folders  – union by ID; for the same ID, the higher updatedAt wins.
+  //              Any ID present in either side's tombstone list is removed.
+  //   Chats    – union; drive wins on key collision (metadata rarely changes).
+  //   Tombstones – union; highest deletedAt kept per ID.
+  function mergeStates(local, drive) {
+    // Merge tombstone maps
+    const deletedMap = new Map();
+    [...(local.deletedFolders || []), ...(drive.deletedFolders || [])].forEach(d => {
+      if (!deletedMap.has(d.id) || d.deletedAt > deletedMap.get(d.id)) {
+        deletedMap.set(d.id, d.deletedAt);
+      }
+    });
+
+    // Merge folders: union, skip tombstoned IDs, newer updatedAt wins
+    const folderMap = new Map();
+    [...(local.folders || []), ...(drive.folders || [])].forEach(f => {
+      if (deletedMap.has(f.id)) return;
+      const existing = folderMap.get(f.id);
+      const fTime = f.updatedAt || f.createdAt || 0;
+      const eTime = existing ? (existing.updatedAt || existing.createdAt || 0) : -1;
+      if (fTime >= eTime) folderMap.set(f.id, f);
+    });
+
+    // Merge chats: union (drive wins on collision)
+    const chats = { ...(local.chats || {}), ...(drive.chats || {}) };
+
+    return {
+      folders:        [...folderMap.values()],
+      chats,
+      deletedFolders: [...deletedMap.entries()].map(([id, deletedAt]) => ({ id, deletedAt })),
+    };
+  }
+
+  function handleSyncError(e, label) {
+    if (!e || e.message === 'No token' || e.message?.includes('not signed in')) {
+      updateSyncStatus('idle');
+    } else {
+      updateSyncStatus('error');
+      console.error(`[GCF] ${label} error:`, e);
+    }
+  }
+
+  async function pullFromDrive() {
+    lastPullTime = Date.now();
+    updateSyncStatus('syncing');
+    try {
+      const token  = await getDriveToken(false);
+      const fileId = await findOrCreateDriveFile(token);
+
+      const res      = await fetch(`${DRIVE_API}/files/${fileId}?alt=media`, { headers: { Authorization: `Bearer ${token}` } });
+      const driveData = await res.json();
+
+      const merged = mergeStates(
+        { folders: state.folders, chats: state.chats, deletedFolders: state.deletedFolders },
+        driveData
+      );
+
+      state.folders        = merged.folders;
+      state.chats          = merged.chats;
+      state.deletedFolders = merged.deletedFolders;
+      state.lastModified   = Date.now();
+
+      persistLocal();
+
+      if (state.foldersVisible) render();
+
+      // Always push the merged result back so Drive stays consistent.
+      // Cancel any pending debounced push first to avoid a redundant second write.
+      clearTimeout(syncTimeout);
+      await pushToDrive();
+    } catch (e) {
+      handleSyncError(e, 'Drive pull');
+    }
+  }
+
+  async function pushToDrive() {
+    if (!state.lastModified) state.lastModified = Date.now();
+    updateSyncStatus('syncing');
+    try {
+      const token  = await getDriveToken(false);
+      const fileId = await findOrCreateDriveFile(token);
+
+      const payload = JSON.stringify({
+        version: 1,
+        lastModified: state.lastModified,
+        folders: state.folders,
+        chats: state.chats,
+        deletedFolders: state.deletedFolders,
+      });
+
+      await fetch(
+        `${DRIVE_UPLOAD}/files/${fileId}?uploadType=media`,
+        {
+          method: 'PATCH',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: payload,
+        }
+      );
+      updateSyncStatus('synced');
+    } catch (e) {
+      handleSyncError(e, 'Drive push');
+    }
+  }
+
+  function schedulePush() {
+    clearTimeout(syncTimeout);
+    syncTimeout = setTimeout(pushToDrive, 2000);
+  }
+
+  function updateSyncStatus(status) {
+    syncStatus = status;
+    const btn    = document.getElementById('gcf-sync-btn');
+    const iconEl = btn?.querySelector('.gcf-sync-icon');
+    if (!btn) return;
+
+    btn.className = `gcf-sync-btn gcf-sync-${status}`;
+    const titles = {
+      idle:    'Connect Google Drive',
+      syncing: 'Syncing…',
+      synced:  'Synced with Google Drive',
+      error:   'Sync error – click to retry',
+    };
+    btn.title = titles[status] || 'Google Drive Sync';
+    if (iconEl) iconEl.innerHTML = syncIconSVG(status);
+  }
+
+  function syncIconSVG(status) {
+    if (status === 'syncing') {
+      return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="gcf-spin"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>';
+    }
+    if (status === 'synced') {
+      return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>';
+    }
+    if (status === 'error') {
+      return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>';
+    }
+    // idle – cloud-upload icon meaning "connect"
+    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg>';
+  }
+
   // ─── INIT ─────────────────────────────────────────────────────────────────────
 
   function init() {
@@ -779,14 +1013,17 @@
       });
       observer.observe(document.body, { childList: true, subtree: true });
 
-      window.addEventListener('resize', () => {
-        if (state.foldersVisible) fitPanelHeight();
+      // Background alarm triggers a sync by writing to storage — react here
+      chrome.storage.onChanged.addListener((changes, area) => {
+        if (area === 'local' && changes.gcf_sync_requested) {
+          pullFromDrive();
+        }
       });
     });
   }
 
   function waitForSidebar() {
-    if (document.querySelector('mat-action-list.top-action-list')) {
+    if (document.querySelector('side-nav-action-button[data-test-id="new-chat-button"]')) {
       init();
     } else {
       setTimeout(waitForSidebar, 400);

@@ -2,45 +2,109 @@
    Gemini Chat Folders – styles.css
    ============================================================================= */
 
-/* ── Toggle Button ───────────────────────────────────────────────────────────
-   Intentionally inherits color from Gemini's sidebar so it looks native
-   in both light and dark mode. Do NOT set explicit color here.
+/* ── Folders Icon Button (next to temp-chat-button) ──────────────────────────
+   Styled to match Material Design icon buttons (mdc-icon-button)
    ──────────────────────────────────────────────────────────────────────────── */
-#gcf-btn {
-  padding: 4px 8px;
-  box-sizing: border-box;
-}
 
-.gcf-toggle {
-  display: flex;
+#gcf-btn.gcf-folders-button {
+  position: relative;
+  display: inline-flex;
   align-items: center;
-  gap: 10px;
-  width: 100%;
-  height: 44px;
-  padding: 0 14px;
-  border: none;
-  border-radius: 10px;
-  background: transparent;
-  color: inherit;            /* ← inherit Gemini's sidebar text colour */
-  font-family: 'Google Sans', 'Roboto', sans-serif;
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 0.15s;
+  justify-content: center;
   box-sizing: border-box;
-  text-align: left;
+  width: 40px;
+  height: 40px;
+  padding: 8px;
+  margin: 0 6px 0 0;
+  border: none;
+  outline: none;
+  background-color: transparent;
+  fill: currentColor;
+  color: inherit;
+  cursor: pointer;
+  user-select: none;
+  vertical-align: middle;
+  text-decoration: none;
+  overflow: visible;
+  border-radius: 50%;
 }
-.gcf-toggle:hover  { background: rgba(128,128,128,0.12); }
-.gcf-toggle.active { background: rgba(128,128,128,0.18); }
 
-/* In dark sidebar make icons slightly brighter when active */
-#gcf-btn.gcf-dark  .gcf-toggle.active { color: #8ab4f8; }
-#gcf-btn.gcf-light .gcf-toggle.active { color: #1a73e8; }
+/* MDC ripple effect */
+#gcf-btn .mat-mdc-button-persistent-ripple {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  opacity: 0;
+  background-color: currentColor;
+  transition: opacity 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+}
 
-.gcf-toggle-icon { display: flex; align-items: center; flex-shrink: 0; }
-.gcf-toggle-icon .gcf-icon { display: flex; width: 20px; height: 20px; }
-.gcf-toggle-icon .gcf-icon svg { width: 20px; height: 20px; }
-.gcf-toggle-label { flex: 1; }
+#gcf-btn:hover .mat-mdc-button-persistent-ripple {
+  opacity: 0.08;
+}
+
+#gcf-btn.active .mat-mdc-button-persistent-ripple {
+  opacity: 0.12;
+}
+
+/* Touch target (accessibility) */
+#gcf-btn .mat-mdc-button-touch-target {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 48px;
+  height: 48px;
+  transform: translate(-50%, -50%);
+}
+
+/* Focus indicator */
+#gcf-btn .mat-focus-indicator {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+/* Icon sizing */
+#gcf-btn .gcf-icon {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  position: relative;
+  z-index: 1;
+}
+
+#gcf-btn .gcf-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+/* Theme-specific active colors */
+#gcf-btn.gcf-dark.active {
+  color: #8ab4f8;
+}
+
+#gcf-btn.gcf-light.active {
+  color: #1a73e8;
+}
+
+/* ── Overlay Container ────────────────────────────────────────────────────── */
+#gcf-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 999999;
+  display: none; /* toggled by JS */
+  align-items: center;
+  justify-content: center;
+}
+
+#gcf-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,0.5);
+  backdrop-filter: blur(4px);
+}
 
 /* ── Panel – dark theme (default) ────────────────────────────────────────── */
 #gcf-panel {
@@ -59,13 +123,23 @@
   --gcf-shadow:      0 4px 24px rgba(0,0,0,0.45);
   --gcf-font:        'Google Sans','Roboto',sans-serif;
 
+  /* Position as a centered overlay popup */
+  position: relative;
+  z-index: 1;
+  width: 66.67vw;  /* 2/3 of viewport width */
+  height: 66.67vh; /* 2/3 of viewport height */
+  max-width: 1200px;
+  max-height: 900px;
+
   display: flex;
   flex-direction: column;
-  width: 100%;
-  /* height is set by fitPanelHeight() in JS.
-     Fallback to 60vh if JS hasn't run yet. */
-  height: 60vh;
   overflow: hidden;
+
+  background: #1e1f26;
+  border-radius: 16px;
+  border: 1px solid var(--gcf-border);
+  box-shadow: var(--gcf-shadow);
+
   font-family: var(--gcf-font);
   color: var(--gcf-text);
   box-sizing: border-box;
@@ -86,6 +160,8 @@
   --gcf-count-bg:    rgba(0,0,0,0.07);
   --gcf-menu-bg:     #ffffff;
   --gcf-shadow:      0 4px 20px rgba(0,0,0,0.15);
+
+  background: #ffffff;
 }
 
 /* ── Header ──────────────────────────────────────────────────────────────── */
@@ -169,6 +245,32 @@
 }
 .gcf-add-root .gcf-icon { display: flex; width: 16px; height: 16px; }
 .gcf-add-root .gcf-icon svg { width: 16px; height: 16px; }
+
+/* ── Drive Sync Button ────────────────────────────────────────────────────── */
+.gcf-sync-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 32px; height: 32px;
+  border: 1px solid var(--gcf-border);
+  border-radius: 50%;
+  background: transparent;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.gcf-sync-btn .gcf-sync-icon { display: flex; width: 16px; height: 16px; }
+.gcf-sync-btn .gcf-sync-icon svg { width: 16px; height: 16px; }
+
+.gcf-sync-idle  { color: var(--gcf-text-muted); }
+.gcf-sync-syncing { color: var(--gcf-accent); border-color: var(--gcf-accent); }
+.gcf-sync-synced  { color: #34a853; border-color: #34a853; }
+.gcf-sync-error   { color: #ff8c00; border-color: #ff8c00; }
+
+.gcf-sync-btn:hover { background: var(--gcf-bg-hover); border-color: var(--gcf-accent); color: var(--gcf-accent); }
+
+@keyframes gcf-spin-anim { to { transform: rotate(360deg); } }
+.gcf-spin { animation: gcf-spin-anim 0.9s linear infinite; transform-origin: center; }
 
 /* ── Tree ─────────────────────────────────────────────────────────────────── */
 .gcf-tree {
@@ -446,7 +548,7 @@
 /* ── Context Menu ─────────────────────────────────────────────────────────── */
 #gcf-menu {
   position: fixed;
-  z-index: 999999;
+  z-index: 1000001;
   width: 186px;
   border-radius: 12px;
   padding: 6px;
@@ -520,7 +622,7 @@
 .gcf-modal-overlay {
   position: fixed;
   inset: 0;
-  z-index: 999998;
+  z-index: 1000000;
   background: rgba(0,0,0,0.50);
   display: flex;
   align-items: center;
