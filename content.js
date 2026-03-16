@@ -116,7 +116,9 @@
   function scrapeChats() {
     const items = [];
     document.querySelectorAll('a[data-test-id="conversation"]').forEach(link => {
-      const m = link.href.match(/\/app\/([a-f0-9]+)/);
+      // Handle both /gem/workspace/chatId and /app/chatId URL patterns
+      let m = link.href.match(/\/gem\/[a-f0-9]+\/([a-f0-9]+)/);
+      if (!m) m = link.href.match(/\/app\/([a-f0-9]+)/);
       if (!m) return;
       const titleEl = link.querySelector('.conversation-title');
       const title = extractTitleText(titleEl, link);
@@ -147,16 +149,36 @@
       edit:      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>',
       trash:     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>',
       folders:   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>',
+      refresh:   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>',
     };
     return `<span class="gcf-icon">${icons[name] || ''}</span>`;
   }
 
-  // Build a chat URL that preserves the /u/N/ user prefix from the current page,
-  // so navigation works correctly for both gemini.google.com/app/… and /u/1/app/…
+  // Build a chat URL that preserves the /u/N/ user prefix from the current page.
+  // Uses /gem/ format for Gemini URLs.
   function chatUrl(chatId) {
     const m = window.location.pathname.match(/^(\/u\/\d+)\//);
     const prefix = m ? m[1] : '';
-    return `https://gemini.google.com${prefix}/app/${chatId}`;
+    return `https://gemini.google.com${prefix}/gem/${chatId}`;
+  }
+
+  // Inject the /u/N/ prefix into a stored URL if the current session has one
+  // and the stored URL doesn't already include it.
+  function resolveUrl(url) {
+    if (!url) return url;
+    const m = window.location.pathname.match(/^(\/u\/\d+)\//);
+    if (!m) return url;
+    const prefix = m[1]; // e.g. "/u/1"
+    if (url.includes(prefix + '/')) return url;
+    return url.replace('https://gemini.google.com/', `https://gemini.google.com${prefix}/`);
+  }
+
+  // Get the current chat ID from the window URL
+  function getCurrentChatId() {
+    // /gem/workspace/chatId pattern
+    let m = window.location.pathname.match(/\/gem\/[a-f0-9]+\/([a-f0-9]+)/);
+    if (!m) m = window.location.pathname.match(/\/app\/([a-f0-9]+)/);
+    return m ? m[1] : null;
   }
 
   // ─── DOM REFS ─────────────────────────────────────────────────────────────────
@@ -311,6 +333,9 @@
                  value="${esc(state.searchQuery)}" autocomplete="off" />
         </div>
         <button class="gcf-add-root" title="New folder">${icon('plus')}</button>
+        <button id="gcf-refresh-btn" class="gcf-refresh-btn" title="Refresh chat list">
+          <span class="gcf-icon">${icon('refresh')}</span>
+        </button>
         <button id="gcf-sync-btn" class="gcf-sync-btn gcf-sync-${syncStatus}" title="${syncStatus === 'idle' ? 'Connect Google Drive' : 'Google Drive Sync'}">
           <span class="gcf-icon gcf-sync-icon">${syncIconSVG(syncStatus)}</span>
         </button>
@@ -329,6 +354,9 @@
       updateTree();
     });
     foldersPanel.querySelector('.gcf-add-root')?.addEventListener('click', () => promptFolder(null));
+    foldersPanel.querySelector('#gcf-refresh-btn')?.addEventListener('click', () => {
+      updateTree();
+    });
     foldersPanel.querySelector('#gcf-sync-btn')?.addEventListener('click', async () => {
       if (syncStatus === 'idle' || syncStatus === 'error') {
         // Need interactive auth
@@ -375,7 +403,8 @@
     if (!treeEl) return;
     const available = scrapeChats();
     const q = state.searchQuery.toLowerCase();
-    treeEl.innerHTML = buildTreeHTML(available, q);
+    const currentChatId = getCurrentChatId();
+    treeEl.innerHTML = buildTreeHTML(available, q, currentChatId);
     bindTreeEvents(available);
   }
 
@@ -391,8 +420,9 @@
     const unassigned = available.filter(c => !assignedIds.has(c.id));
     const uq = state.unassignedQuery.toLowerCase();
     const visible = uq ? unassigned.filter(c => c.title.toLowerCase().includes(uq)) : unassigned;
+    const currentChatId = getCurrentChatId();
 
-    listEl.innerHTML = visible.map(c => renderChatItem(c, null, 1)).join('') +
+    listEl.innerHTML = visible.map(c => renderChatItem(c, null, 1, currentChatId)).join('') +
       (uq && visible.length === 0 ? `<div class="gcf-empty-inline">No matches</div>` : '');
 
     if (countEl) {
@@ -403,14 +433,14 @@
     listEl.querySelectorAll('.gcf-chat').forEach(item => {
       item.addEventListener('click', e => {
         if (e.target.closest('.gcf-remove-chat')) return;
-        window.location.href = chatUrl(item.dataset.chatId);
+        window.location.href = resolveUrl(item.dataset.url) || chatUrl(item.dataset.chatId);
       });
     });
     // Re-bind drag on new items
     bindDragDrop(available);
   }
 
-  function buildTreeHTML(available, q) {
+  function buildTreeHTML(available, q, currentChatId) {
     const roots = state.folders.filter(f => !f.parentId);
     const matched = q ? filterFolders(roots, q) : roots;
 
@@ -431,7 +461,7 @@
       html += `<div class="gcf-empty"><p>No matching folders for "${esc(state.searchQuery)}"</p></div>`;
     }
 
-    matched.forEach(f => { html += renderFolder(f, 0, available, q); });
+    matched.forEach(f => { html += renderFolder(f, 0, available, q, currentChatId); });
 
     if (unassigned.length > 0) {
       const uq = state.unassignedQuery.toLowerCase();
@@ -454,7 +484,7 @@
           ${state.unassignedQuery ? `<button class="gcf-unassigned-clear" title="Clear">${icon('close')}</button>` : ''}
         </div>` : ''}
         <div id="gcf-unassigned-list" class="gcf-drop-zone" data-folder-id="">
-          ${visibleUnassigned.map(c => renderChatItem(c, null, 1)).join('')}
+          ${visibleUnassigned.map(c => renderChatItem(c, null, 1, currentChatId)).join('')}
           ${uq && visibleUnassigned.length === 0 ? `<div class="gcf-empty-inline">No matches</div>` : ''}
         </div>
       </div>`;
@@ -463,7 +493,7 @@
     return html;
   }
 
-  function renderFolder(folder, depth, available, q) {
+  function renderFolder(folder, depth, available, q, currentChatId) {
     const children = state.folders.filter(f => f.parentId === folder.id);
     const chats = folder.chatIds.map(id => {
       const live = available.find(c => c.id === id);
@@ -489,17 +519,18 @@
         </div>
         <div class="gcf-folder-body ${isExpanded ? 'open' : ''}" data-folder-id="${folder.id}">
           <div class="gcf-drop-zone" data-folder-id="${folder.id}">
-            ${fq.map(c => renderChatItem(c, folder.id, depth + 1)).join('')}
+            ${fq.map(c => renderChatItem(c, folder.id, depth + 1, currentChatId)).join('')}
           </div>
-          ${fc.map(child => renderFolder(child, depth + 1, available, q)).join('')}
+          ${fc.map(child => renderFolder(child, depth + 1, available, q, currentChatId)).join('')}
         </div>
       </div>`;
   }
 
-  function renderChatItem(chat, folderId, depth) {
+  function renderChatItem(chat, folderId, depth, currentChatId) {
     const indent = depth * 14;
+    const isActive = chat.id === currentChatId;
     return `
-      <div class="gcf-chat" data-chat-id="${chat.id}" data-folder-id="${folderId || ''}"
+      <div class="gcf-chat ${isActive ? 'gcf-chat-active' : ''}" data-chat-id="${chat.id}" data-url="${esc(chat.url || '')}" data-folder-id="${folderId || ''}"
            draggable="true" style="padding-left:${10 + indent}px" title="${esc(chat.title)}">
         ${icon('chat')}
         <span class="gcf-chat-title">${esc(chat.title)}</span>
@@ -556,7 +587,7 @@
     tree.querySelectorAll('.gcf-chat').forEach(item => {
       item.addEventListener('click', e => {
         if (e.target.closest('.gcf-remove-chat')) return;
-        window.location.href = chatUrl(item.dataset.chatId);
+        window.location.href = resolveUrl(item.dataset.url) || chatUrl(item.dataset.chatId);
       });
     });
 

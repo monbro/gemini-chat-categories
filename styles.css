@@ -247,6 +247,7 @@
 .gcf-add-root .gcf-icon svg { width: 16px; height: 16px; }
 
 /* ── Drive Sync Button ────────────────────────────────────────────────────── */
+.gcf-refresh-btn,
 .gcf-sync-btn {
   display: flex;
   align-items: center;
@@ -259,8 +260,13 @@
   cursor: pointer;
   transition: background 0.15s, border-color 0.15s, color 0.15s;
 }
+.gcf-refresh-btn .gcf-icon,
 .gcf-sync-btn .gcf-sync-icon { display: flex; width: 16px; height: 16px; }
+.gcf-refresh-btn .gcf-icon svg,
 .gcf-sync-btn .gcf-sync-icon svg { width: 16px; height: 16px; }
+
+.gcf-refresh-btn { color: var(--gcf-text-muted); }
+.gcf-refresh-btn:hover { background: var(--gcf-bg-hover); border-color: var(--gcf-accent); color: var(--gcf-accent); }
 
 .gcf-sync-idle  { color: var(--gcf-text-muted); }
 .gcf-sync-syncing { color: var(--gcf-accent); border-color: var(--gcf-accent); }
@@ -299,6 +305,17 @@
 .gcf-empty .gcf-icon svg { width: 40px; height: 40px; }
 .gcf-empty p { margin: 0; font-size: 14px; font-weight: 500; color: var(--gcf-text); opacity: 0.65; }
 .gcf-empty span { font-size: 12px; }
+
+/* ── Loading State ───────────────────────────────────────────────────────── */
+.gcf-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 50px 20px;
+  font-size: 14px;
+  color: var(--gcf-text-muted);
+  text-align: center;
+}
 
 /* ── Folder ───────────────────────────────────────────────────────────────── */
 .gcf-folder {
@@ -437,6 +454,11 @@
 .gcf-chat:hover { background: var(--gcf-bg-hover); }
 .gcf-chat:hover .gcf-remove-chat { opacity: 1; }
 .gcf-chat.gcf-dragging { opacity: 0.4; }
+.gcf-chat.gcf-chat-active {
+  background: var(--gcf-bg-active);
+  font-weight: 500;
+}
+.gcf-chat.gcf-chat-active .gcf-chat-title { color: var(--gcf-accent); }
 
 .gcf-chat > .gcf-icon {
   display: flex;
