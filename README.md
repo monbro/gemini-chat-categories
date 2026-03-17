@@ -16,6 +16,12 @@ A Chrome extension that adds folder organization to Google Gemini — with drag 
 
 ---
 
+## Screenshot
+
+![Gemini Chat Folders panel with nested folders, chat counts, and unassigned chats](./screen.png)
+
+---
+
 ## Installation
 
 1. Clone or download this repository
